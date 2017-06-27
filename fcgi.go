@@ -65,9 +65,10 @@ const (
 type Client struct {
 	c net.Conn
 
-	sl sync.RWMutex
-	sm map[uint16]*Request
-	id uint16
+	sl      sync.RWMutex
+	sm      map[uint16]*Request
+	id      uint16
+	isAlive bool
 }
 
 // Close ...
@@ -76,12 +77,16 @@ func (c *Client) Close() error {
 	return c.c.Close()
 }
 
-func (c *Client) sub(r *Request) {
+func (c *Client) sub(r *Request) error {
 	c.sl.Lock()
 	defer c.sl.Unlock()
+	if !c.isAlive {
+		return errors.New("Attempting to use closed connection")
+	}
 	c.id++
 	r.id = c.id
 	c.sm[c.id] = r
+	return nil
 }
 
 func (c *Client) unsub(id uint16) {
@@ -318,7 +323,9 @@ func (c *Client) BeginRequest(
 	var buf buffer
 	buf.Reset()
 
-	c.sub(r)
+	if err := c.sub(r); err != nil {
+		return nil, err
+	}
 
 	if err := writeBeginReq(c.c, &buf, r.id); err != nil {
 		return nil, err
@@ -343,6 +350,9 @@ func (c *Client) BeginRequest(
 }
 
 func (c *Client) shutdown(err error) {
+	c.sl.Lock()
+	c.isAlive = false
+	c.sl.Unlock()
 	for id, r := range c.sm {
 		c.unsub(id)
 		r.cw <- err
@@ -406,8 +416,9 @@ func Dial(network, addr string) (*Client, error) {
 	}
 
 	c := &Client{
-		c:  con,
-		sm: map[uint16]*Request{},
+		c:       con,
+		sm:      map[uint16]*Request{},
+		isAlive: true,
 	}
 
 	go receive(c)
